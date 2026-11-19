@@ -89,10 +89,13 @@ export class Renderer3D {
   private rangeBorder!: THREE.Mesh;
   private cmAuraCircle!: THREE.Mesh;
 
-  // Panning state
+  // Panning & Touch state
   private isPanning = false;
   private lastPointerX = 0;
   private lastPointerY = 0;
+  private activeTouches = new Map<number, { x: number; y: number }>();
+  private lastPinchDist = 0;
+  public touchMovedDuringGesture = false;
 
   constructor(container: HTMLElement, overlayCanvas: HTMLCanvasElement) {
     this.container = container;
@@ -209,6 +212,82 @@ export class Renderer3D {
     window.addEventListener('mouseup', () => {
       this.isPanning = false;
     });
+
+    // Touch controls: 1-finger drag to pan, 2-finger pinch to zoom
+    el.addEventListener(
+      'touchstart',
+      (e) => {
+        if (e.touches.length === 1) {
+          this.touchMovedDuringGesture = false;
+        }
+        this.activeTouches.clear();
+        for (let i = 0; i < e.touches.length; i++) {
+          const t = e.touches[i];
+          this.activeTouches.set(t.identifier, { x: t.clientX, y: t.clientY });
+        }
+        if (e.touches.length === 2) {
+          this.touchMovedDuringGesture = true;
+          this.lastPinchDist = Math.hypot(
+            e.touches[0].clientX - e.touches[1].clientX,
+            e.touches[0].clientY - e.touches[1].clientY
+          );
+        }
+      },
+      { passive: true }
+    );
+
+    el.addEventListener(
+      'touchmove',
+      (e) => {
+        e.preventDefault();
+        if (e.touches.length === 1) {
+          const t = e.touches[0];
+          const prev = this.activeTouches.get(t.identifier);
+          if (prev) {
+            const dx = t.clientX - prev.x;
+            const dy = t.clientY - prev.y;
+            if (Math.hypot(dx, dy) > 4) {
+              this.touchMovedDuringGesture = true;
+            }
+            const panSpeed = this.camDistance * 0.0016;
+            const cos = Math.cos(this.camYaw);
+            const sin = Math.sin(this.camYaw);
+            this.camTarget.x -= (dx * cos + dy * sin) * panSpeed;
+            this.camTarget.z -= (-dx * sin + dy * cos) * panSpeed;
+            this.camTarget.x = THREE.MathUtils.clamp(this.camTarget.x, -26, 26);
+            this.camTarget.z = THREE.MathUtils.clamp(this.camTarget.z, -18, 20);
+          }
+          this.activeTouches.set(t.identifier, { x: t.clientX, y: t.clientY });
+        } else if (e.touches.length === 2) {
+          this.touchMovedDuringGesture = true;
+          const dist = Math.hypot(
+            e.touches[0].clientX - e.touches[1].clientX,
+            e.touches[0].clientY - e.touches[1].clientY
+          );
+          if (this.lastPinchDist > 0) {
+            const delta = this.lastPinchDist - dist;
+            this.camDistance = THREE.MathUtils.clamp(this.camDistance + delta * 0.12, 22, 105);
+          }
+          this.lastPinchDist = dist;
+        }
+      },
+      { passive: false }
+    );
+
+    el.addEventListener(
+      'touchend',
+      (e) => {
+        if (e.touches.length < 2) {
+          this.lastPinchDist = 0;
+        }
+        this.activeTouches.clear();
+        for (let i = 0; i < e.touches.length; i++) {
+          const t = e.touches[i];
+          this.activeTouches.set(t.identifier, { x: t.clientX, y: t.clientY });
+        }
+      },
+      { passive: true }
+    );
 
     window.addEventListener('keydown', (e) => {
       if (e.key === 'q' || e.key === 'Q') {

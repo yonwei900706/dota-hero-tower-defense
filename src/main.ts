@@ -28,6 +28,10 @@ glCanvas.addEventListener('mouseleave', () => {
 
 glCanvas.addEventListener('click', (e) => {
   if (e.button !== 0) return;
+  if (renderer.touchMovedDuringGesture) {
+    renderer.touchMovedDuringGesture = false;
+    return;
+  }
   const pt = renderer.screenToGameCoords(e.clientX, e.clientY);
   if (pt) {
     engine.handleCanvasClick(pt.x, pt.y);

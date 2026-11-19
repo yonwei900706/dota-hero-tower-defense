@@ -52,6 +52,7 @@ export class HUDController {
   private inspItemCount = document.getElementById('insp-item-count')!;
   private inspItemsEl = document.getElementById('insp-items')!;
   private inspTargetBtns = document.getElementById('insp-target-btns')!;
+  private btnCloseInsp = document.getElementById('btn-close-insp') as HTMLButtonElement;
   private btnUpgrade = document.getElementById('btn-upgrade') as HTMLButtonElement;
   private btnSell = document.getElementById('btn-sell') as HTMLButtonElement;
   private inspSellValue = document.getElementById('insp-sell-value')!;
@@ -138,6 +139,7 @@ export class HUDController {
 
     this.btnUpgrade.addEventListener('click', () => this.engine.upgradeSelectedTower());
     this.btnSell.addEventListener('click', () => this.engine.sellSelectedTower());
+    this.btnCloseInsp.addEventListener('click', () => this.engine.selectTower(null));
 
     this.inspTargetBtns.querySelectorAll<HTMLButtonElement>('.target-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
