@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dota Hero Tower Defense</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;900&family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Top HUD Bar -->
+      <header id="top-bar">
+        <div class="top-group">
+          <div class="stat-pill ancient-pill" title="Radiant Ancient HP">
+            <span class="pill-icon">🏛️</span>
+            <span class="pill-label">ANCIENT</span>
+            <span id="stat-lives" class="pill-value">20</span>
+          </div>
+          <div class="stat-pill gold-pill" title="Current Gold">
+            <span class="pill-icon">🪙</span>
+            <span class="pill-label">GOLD</span>
+            <span id="stat-gold" class="pill-value">250</span>
+          </div>
+          <div class="stat-pill wave-pill" title="Current Wave">
+            <span class="pill-icon">⚔️</span>
+            <span class="pill-label">WAVE</span>
+            <span id="stat-wave" class="pill-value">0 / 40</span>
+          </div>
+        </div>
+
+        <div id="wave-banner" class="wave-banner">
+          <span id="wave-title">PREPARE YOUR DEFENSES</span>
+          <span id="wave-subtitle">Select a Hero (1–8) &amp; click a pedestal</span>
+        </div>
+
+        <div class="top-group controls-group">
+          <button id="btn-next-wave" class="dota-btn btn-primary" title="Send Next Wave (Enter)">
+            ▶ WAVE 1
+          </button>
+          <button id="btn-auto-wave" class="dota-btn btn-secondary" title="Toggle Auto-Send Wave">
+            AUTO
+          </button>
+          <button id="btn-speed" class="dota-btn btn-secondary" title="Toggle Speed (1x / 2x / 3x)">
+            1x
+          </button>
+          <button id="btn-pause" class="dota-btn btn-secondary" title="Pause / Resume (Space)">
+            ⏸
+          </button>
+          <button id="btn-mute" class="dota-btn btn-secondary" title="Toggle Sound">
+            🔊
+          </button>
+        </div>
+      </header>
+
+      <!-- Boss HP Bar (Waves 5, 10, 15, 20) -->
+      <div id="boss-bar-container" class="boss-bar-container hidden">
+        <div class="boss-header">
+          <span id="boss-name" class="boss-name">🔥 ROSHAN — THE IMMORTAL</span>
+          <span id="boss-status" class="boss-status">SPELL BLOCK READY</span>
+          <span id="boss-hp-text" class="boss-hp-text">42,000 / 42,000</span>
+        </div>
+        <div class="boss-hp-track">
+          <div id="boss-hp-fill" class="boss-hp-fill"></div>
+          <div id="boss-enrage-marker" class="boss-enrage-marker" title="Enrage Threshold"></div>
+        </div>
+      </div>
+
+      <!-- Main 3D Game Viewport -->
+      <main id="canvas-wrapper">
+        <canvas id="hud-overlay-canvas"></canvas>
+
+        <!-- Global Dota Commander Spells & 4-Season Switcher -->
+        <div class="tactical-spells">
+          <button id="btn-glyph" class="spell-btn glyph-btn" title="Glyph of Fortification (G): Ancient invulnerable + 35% Attack Speed for 5s">
+            <span class="spell-key">G</span>
+            <span class="spell-icon">🛡️</span>
+            <span id="glyph-label" class="spell-label">GLYPH</span>
+          </button>
+          <button id="btn-sunstrike" class="spell-btn sunstrike-btn" title="Sunstrike (F): Click anywhere on the lane for massive Pure orbital damage">
+            <span class="spell-key">F</span>
+            <span class="spell-icon">☄️</span>
+            <span id="sunstrike-label" class="spell-label">SUNSTRIKE</span>
+          </button>
+          <button id="btn-season" class="spell-btn season-btn" title="Current Season (auto-changes every 10 waves; click to preview Spring / Summer / Autumn / Winter)">
+            <span id="season-label" class="spell-label">🌸 SPRING</span>
+          </button>
+        </div>
+
+        <div class="camera-hint">
+          <span>🖱️ Scroll: Zoom</span>
+          <span>Right-Drag: Pan</span>
+          <span>Q/E: Orbit</span>
+          <span>R: Reset</span>
+        </div>
+
+        <!-- Start / Victory / Defeat Overlay -->
+        <div id="overlay" class="overlay">
+          <div class="overlay-card">
+            <div class="overlay-crest">⚔️</div>
+            <h1 id="overlay-title">DOTA HERO TOWER DEFENSE</h1>
+            <p id="overlay-desc">
+              Defend the <strong>Radiant Ancient</strong> across <strong>40 Hardcore Waves</strong> spanning all <strong>4 Seasons</strong> (Spring, Summer, Autumn, Winter) with 7 Bosses and <strong>Roshan</strong> on Wave 40!
+            </p>
+            <div id="difficulty-picker" class="difficulty-picker">
+              <button id="btn-diff-hard" class="diff-btn active" data-diff="hard">
+                <strong>⚔️ HARD</strong>
+                <span>15 Ancient HP • Tough Scaling</span>
+              </button>
+              <button id="btn-diff-immortal" class="diff-btn" data-diff="immortal">
+                <strong>💀 IMMORTAL</strong>
+                <span>10 HP • +55% Enemy HP • +15% Speed</span>
+              </button>
+            </div>
+            <div id="overlay-stats" class="overlay-stats hidden"></div>
+            <div class="overlay-tips">
+              <span><strong>1–8</strong> Buy Hero</span>
+              <span><strong>U</strong> Upgrade</span>
+              <span><strong>G/F</strong> Glyph &amp; Sunstrike</span>
+              <span><strong>Space</strong> Pause</span>
+            </div>
+            <button id="btn-overlay-action" class="dota-btn btn-primary btn-large">
+              ENTER BATTLE
+            </button>
+          </div>
+        </div>
+      </main>
+
+      <!-- Bottom Dota HUD -->
+      <footer id="bottom-hud">
+        <!-- Hero Shop Panel -->
+        <section class="hud-panel shop-panel">
+          <div class="panel-header">
+            <span>HERO TAVERN</span>
+            <span class="panel-hint">Select Hero (1–8) then click a 3D stone pedestal</span>
+          </div>
+          <div id="hero-shop" class="hero-shop-grid"></div>
+        </section>
+
+        <!-- Selected Hero Inspector / Wave Intel -->
+        <section class="hud-panel inspector-panel">
+          <div id="inspector-empty" class="inspector-empty">
+            <div class="intel-header">NEXT WAVE INTEL</div>
+            <div id="next-wave-intel" class="intel-body"></div>
+          </div>
+          <div id="inspector-active" class="inspector-active hidden">
+            <div class="inspector-top">
+              <div class="inspector-identity">
+                <div id="insp-avatar" class="insp-avatar"></div>
+                <div>
+                  <div class="insp-name-row">
+                    <span id="insp-name" class="insp-name">Sniper</span>
+                    <span id="insp-level" class="insp-level">LVL 1</span>
+                  </div>
+                  <div id="insp-role" class="insp-role">Physical • Long-Range</div>
+                </div>
+              </div>
+              <div class="inspector-targeting">
+                <div id="insp-target-btns" class="target-btn-group">
+                  <button data-target="first" class="target-btn active">First</button>
+                  <button data-target="strongest" class="target-btn">Strong</button>
+                  <button data-target="closest" class="target-btn">Close</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="inspector-stats-row">
+              <div class="mini-stat"><span>DMG</span><strong id="insp-dmg">34</strong></div>
+              <div class="mini-stat"><span>SPD</span><strong id="insp-spd">1.15/s</strong></div>
+              <div class="mini-stat"><span>KILLS</span><strong id="insp-kills">0</strong></div>
+              <div class="mini-stat"><span>TOTAL</span><strong id="insp-total-dmg">0</strong></div>
+            </div>
+
+            <!-- Secret Shop Item Slots (Max 3 per hero) -->
+            <div class="secret-shop-row">
+              <span class="secret-shop-label">ITEMS (<span id="insp-item-count">0</span>/3):</span>
+              <div id="insp-items" class="secret-shop-btns"></div>
+            </div>
+
+            <div class="inspector-actions">
+              <button id="btn-upgrade" class="dota-btn btn-upgrade">
+                ⬆ UPGRADE
+              </button>
+              <button id="btn-sell" class="dota-btn btn-sell">
+                💰 SELL (+<span id="insp-sell-value">56g</span>)
+              </button>
+            </div>
+          </div>
+        </section>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
