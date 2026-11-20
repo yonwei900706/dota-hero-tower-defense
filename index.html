@@ -89,6 +89,28 @@
           <button id="btn-season" class="spell-btn season-btn" title="Current Season (auto-changes every 10 waves; click to preview Spring / Summer / Autumn / Winter)">
             <span id="season-label" class="spell-label">🌸 SPRING</span>
           </button>
+          <button id="btn-timeofday" class="spell-btn time-btn" title="Day / Night Cycle (auto-shifts every 4 waves; click to preview)">
+            <span id="timeofday-label" class="spell-label">☀️ DAY</span>
+          </button>
+          <button id="btn-quality" class="spell-btn quality-btn" title="Toggle 3D Graphics Quality (High: Bloom & Reflections / Med: Performance)">
+            <span id="quality-label" class="spell-label">✨ HI</span>
+          </button>
+        </div>
+
+        <!-- Synergy, Active Rune Buffs & Owned Relics Bar -->
+        <div id="synergy-bar" class="synergy-bar"></div>
+
+        <!-- Dota Killstreak Announcer Banner -->
+        <div id="killstreak-banner" class="killstreak-banner hidden"></div>
+
+        <!-- Neutral Boss Loot Relic Modal (Waves 5..35) -->
+        <div id="relic-modal" class="overlay relic-modal hidden">
+          <div class="overlay-card relic-card-wrap">
+            <div class="overlay-crest">🏆</div>
+            <h2>BOSS NEUTRAL RELIC</h2>
+            <p class="relic-subtitle">Choose 1 permanent blessing for your army:</p>
+            <div id="relic-choices" class="relic-choices"></div>
+          </div>
         </div>
 
         <div class="camera-hint">
@@ -175,6 +197,9 @@
               <div class="mini-stat"><span>KILLS</span><strong id="insp-kills">0</strong></div>
               <div class="mini-stat"><span>TOTAL</span><strong id="insp-total-dmg">0</strong></div>
             </div>
+
+            <!-- Level 3 Hero Talent Tree -->
+            <div id="insp-talent-row" class="talent-row hidden"></div>
 
             <!-- Secret Shop Item Slots (Max 3 per hero) -->
             <div class="secret-shop-row">

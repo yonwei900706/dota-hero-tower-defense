@@ -10,7 +10,54 @@ export type HeroId =
   | 'drow_ranger'
   | 'zeus';
 
-export type ItemId = 'desolator' | 'daedalus' | 'moon_shard' | 'octarine_core';
+export type ItemId =
+  | 'desolator'
+  | 'daedalus'
+  | 'moon_shard'
+  | 'octarine_core'
+  | 'mjollnir'
+  | 'divine_rapier';
+
+export type RuneKind = 'double_damage' | 'arcane' | 'bounty' | 'haste';
+
+export type SynergyId = 'elemental' | 'marksman' | 'frontline' | 'plague_frost';
+
+export type TalentChoice = 'left' | 'right';
+
+export type RelicId =
+  | 'philosopher_stone'
+  | 'aegis_fragment'
+  | 'skadi_aura'
+  | 'mjollnir_blessing'
+  | 'arcane_ring'
+  | 'paladin_sword';
+
+export type TimeOfDay = 'day' | 'night';
+
+export type GraphicsQuality = 'high' | 'medium';
+
+export interface ActiveRune {
+  id: number;
+  kind: RuneKind;
+  x: number;
+  y: number;
+  ttl: number;
+  maxTtl: number;
+}
+
+export interface ActiveRuneBuff {
+  kind: Exclude<RuneKind, 'bounty'>;
+  remaining: number;
+  duration: number;
+}
+
+export interface BurstEvent {
+  kind: 'gold_coins' | 'frost' | 'fire' | 'venom' | 'rock' | 'lightning' | 'crit';
+  x: number;
+  y: number;
+  color: string;
+  count: number;
+}
 
 export type Season = 'spring' | 'summer' | 'autumn' | 'winter';
 
@@ -93,7 +140,8 @@ export interface TowerInstance {
   totalInvested: number;
   kills: number;
   totalDamage: number;
-  items: ItemId[]; // max 2 Secret Shop items
+  items: ItemId[]; // max 3 Secret Shop items
+  talent: TalentChoice | null;
   targetPriority: TargetPriority;
   attackCooldown: number;
   mana: number;
@@ -188,6 +236,8 @@ export interface Projectile {
   isHeadshot?: boolean;
   isCrit?: boolean;
   applyDesolator?: boolean;
+  applyMjollnir?: boolean;
+  applyBurnDps?: number;
   splashRadius?: number;
   slowFactor?: number;
   slowDuration?: number;
@@ -234,6 +284,7 @@ export interface GameSnapshot {
   phase: GamePhase;
   difficulty: Difficulty;
   season: Season;
+  timeOfDay: TimeOfDay;
   gold: number;
   lives: number;
   maxLives: number;
@@ -250,6 +301,11 @@ export interface GameSnapshot {
   glyphActiveTimer: number;
   sunstrikeCooldown: number;
   sunstrikeTargeting: boolean;
+  activeSynergies: SynergyId[];
+  activeRuneBuffs: ActiveRuneBuff[];
+  pendingRelicChoices: RelicId[] | null;
+  ownedRelics: RelicId[];
+  killstreakBanner: { text: string; color: string; id: number } | null;
   boss: {
     active: boolean;
     name: string;

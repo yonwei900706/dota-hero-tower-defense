@@ -1,13 +1,16 @@
 import { HERO_LIST, HERO_MAP } from '../data/heroes';
 import { SECRET_SHOP_ITEMS } from '../data/items';
+import { HERO_TALENTS, RELIC_MAP, RUNE_DEFS, SYNERGY_MAP } from '../data/mechanics';
 import { HERO_PORTRAITS } from '../data/portraits';
 import { WAVES } from '../data/waves';
 import { sound } from '../engine/Audio';
 import { GameEngine } from '../engine/GameEngine';
-import { Difficulty, ItemId, Season, TargetPriority } from '../types';
+import { Difficulty, GraphicsQuality, ItemId, Season, TargetPriority } from '../types';
 
 export class HUDController {
   private engine: GameEngine;
+  private onToggleQuality: () => GraphicsQuality;
+  private getQuality: () => GraphicsQuality;
 
   private statLives = document.getElementById('stat-lives')!;
   private statGold = document.getElementById('stat-gold')!;
@@ -27,7 +30,19 @@ export class HUDController {
   private sunstrikeLabel = document.getElementById('sunstrike-label')!;
   private btnSeason = document.getElementById('btn-season') as HTMLButtonElement;
   private seasonLabel = document.getElementById('season-label')!;
+  private btnTimeOfDay = document.getElementById('btn-timeofday') as HTMLButtonElement;
+  private timeOfDayLabel = document.getElementById('timeofday-label')!;
+  private btnQuality = document.getElementById('btn-quality') as HTMLButtonElement;
+  private qualityLabel = document.getElementById('quality-label')!;
   private difficultyPicker = document.getElementById('difficulty-picker')!;
+
+  private synergyBar = document.getElementById('synergy-bar')!;
+  private killstreakBannerEl = document.getElementById('killstreak-banner')!;
+  private lastBannerId = -1;
+  private bannerHideTimer: number | null = null;
+
+  private relicModal = document.getElementById('relic-modal')!;
+  private relicChoicesEl = document.getElementById('relic-choices')!;
 
   private bossBarContainer = document.getElementById('boss-bar-container')!;
   private bossName = document.getElementById('boss-name')!;
@@ -49,6 +64,7 @@ export class HUDController {
   private inspSpd = document.getElementById('insp-spd')!;
   private inspKills = document.getElementById('insp-kills')!;
   private inspTotalDmg = document.getElementById('insp-total-dmg')!;
+  private inspTalentRow = document.getElementById('insp-talent-row')!;
   private inspItemCount = document.getElementById('insp-item-count')!;
   private inspItemsEl = document.getElementById('insp-items')!;
   private inspTargetBtns = document.getElementById('insp-target-btns')!;
@@ -66,8 +82,14 @@ export class HUDController {
   private shopButtons = new Map<string, HTMLButtonElement>();
   private itemButtons = new Map<ItemId, HTMLButtonElement>();
 
-  constructor(engine: GameEngine) {
+  constructor(
+    engine: GameEngine,
+    getQuality: () => GraphicsQuality,
+    onToggleQuality: () => GraphicsQuality
+  ) {
     this.engine = engine;
+    this.getQuality = getQuality;
+    this.onToggleQuality = onToggleQuality;
     this.buildShop();
     this.buildSecretShop();
     this.bindEvents();
@@ -102,6 +124,8 @@ export class HUDController {
       daedalus: 'Daed',
       moon_shard: 'Moon',
       octarine_core: 'Octa',
+      mjollnir: 'Mjol',
+      divine_rapier: 'Rapier',
     };
     for (const item of SECRET_SHOP_ITEMS) {
       const btn = document.createElement('button');
@@ -129,6 +153,11 @@ export class HUDController {
     this.btnGlyph.addEventListener('click', () => this.engine.activateGlyph());
     this.btnSunstrike.addEventListener('click', () => this.engine.toggleSunstrikeTargeting());
     this.btnSeason.addEventListener('click', () => this.engine.cycleSeasonPreview());
+    this.btnTimeOfDay.addEventListener('click', () => this.engine.toggleTimeOfDayPreview());
+    this.btnQuality.addEventListener('click', () => {
+      this.onToggleQuality();
+      this.sync();
+    });
 
     this.difficultyPicker.querySelectorAll<HTMLButtonElement>('.diff-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -221,7 +250,7 @@ export class HUDController {
       }
     }
 
-    // Season badge
+    // Season, Time of Day & Graphics Quality pills
     const seasonNames: Record<Season, string> = {
       spring: '🌸 SPRING',
       summer: '☀️ SUMMER',
@@ -230,6 +259,12 @@ export class HUDController {
     };
     this.seasonLabel.textContent = seasonNames[snap.season];
     this.btnSeason.dataset.season = snap.season;
+
+    this.timeOfDayLabel.textContent = snap.timeOfDay === 'night' ? '🌙 NIGHT' : '☀️ DAY';
+    this.btnTimeOfDay.dataset.time = snap.timeOfDay;
+
+    const q = this.getQuality();
+    this.qualityLabel.textContent = q === 'high' ? '✨ HI' : '⚡ MED';
 
     // Difficulty buttons
     this.difficultyPicker.querySelectorAll<HTMLButtonElement>('.diff-btn').forEach((btn) => {
@@ -267,7 +302,64 @@ export class HUDController {
       this.sunstrikeLabel.textContent = snap.sunstrikeTargeting ? 'CLICK LANE!' : 'SUNSTRIKE';
     }
 
-    // Dynamic Boss HP Bar (Waves 5, 10, 15, 20)
+    // Synergy, Active Rune Buffs & Owned Relics Bar
+    const badges: string[] = [];
+    for (const sId of snap.activeSynergies) {
+      const s = SYNERGY_MAP[sId];
+      badges.push(
+        `<span class="hud-badge synergy-badge" style="border-color:${s.color}" title="${s.desc}">${s.icon} ${s.name}</span>`
+      );
+    }
+    for (const buff of snap.activeRuneBuffs) {
+      const r = RUNE_DEFS[buff.kind];
+      badges.push(
+        `<span class="hud-badge rune-badge" style="border-color:${r.color}" title="${r.shortDesc}">${r.icon} ${r.name} ${Math.ceil(buff.remaining)}s</span>`
+      );
+    }
+    for (const relId of snap.ownedRelics) {
+      const rel = RELIC_MAP[relId];
+      badges.push(
+        `<span class="hud-badge relic-badge" style="border-color:${rel.color}" title="${rel.name}: ${rel.desc}">${rel.icon}</span>`
+      );
+    }
+    this.synergyBar.innerHTML = badges.join('');
+
+    // Killstreak Announcer Banner
+    if (snap.killstreakBanner && snap.killstreakBanner.id !== this.lastBannerId) {
+      this.lastBannerId = snap.killstreakBanner.id;
+      this.killstreakBannerEl.textContent = snap.killstreakBanner.text;
+      this.killstreakBannerEl.style.color = snap.killstreakBanner.color;
+      this.killstreakBannerEl.classList.remove('hidden');
+      if (this.bannerHideTimer !== null) window.clearTimeout(this.bannerHideTimer);
+      this.bannerHideTimer = window.setTimeout(() => {
+        this.killstreakBannerEl.classList.add('hidden');
+      }, 2200);
+    }
+
+    // Neutral Boss Loot Relic Modal
+    if (snap.pendingRelicChoices && snap.pendingRelicChoices.length > 0) {
+      if (this.relicModal.classList.contains('hidden')) {
+        this.relicChoicesEl.innerHTML = '';
+        for (const rId of snap.pendingRelicChoices) {
+          const rel = RELIC_MAP[rId];
+          const card = document.createElement('button');
+          card.className = 'relic-choice-card';
+          card.style.setProperty('--relic-color', rel.color);
+          card.innerHTML = `
+            <span class="relic-icon">${rel.icon}</span>
+            <strong>${rel.name}</strong>
+            <span>${rel.desc}</span>
+          `;
+          card.addEventListener('click', () => this.engine.chooseRelic(rId));
+          this.relicChoicesEl.appendChild(card);
+        }
+        this.relicModal.classList.remove('hidden');
+      }
+    } else {
+      this.relicModal.classList.add('hidden');
+    }
+
+    // Dynamic Boss HP Bar
     if (snap.boss && snap.boss.active) {
       this.bossBarContainer.classList.remove('hidden');
       const pct = Math.max(0, (snap.boss.hp / snap.boss.maxHp) * 100);
@@ -321,18 +413,50 @@ export class HUDController {
       this.inspLevel.classList.toggle('aghs-badge', selectedTower.level === 4);
       this.inspRole.textContent =
         def.role +
-        (selectedTower.precisionBoosted ? ' • +Dmg Aura' : '') +
-        (selectedTower.auraBoosted ? ' • +Mana Aura' : '');
+        (selectedTower.precisionBoosted ? ' • +Dmg' : '') +
+        (selectedTower.auraBoosted ? ' • +Mana' : '');
 
-      const effectiveSpd =
-        stats.attackRate * (selectedTower.items.includes('moon_shard') ? 1.45 : 1);
-      this.inspDmg.textContent = String(stats.damage);
-      this.inspSpd.textContent = `${effectiveSpd.toFixed(2)}/s`;
+      let spdMult = selectedTower.items.includes('moon_shard') ? 1.45 : 1.0;
+      if (selectedTower.items.includes('mjollnir')) spdMult *= 1.25;
+      if (selectedTower.heroId === 'lina' && selectedTower.talent === 'left') spdMult *= 1.35;
+
+      const dmgBonusMult =
+        (selectedTower.items.includes('divine_rapier') ? 2.5 : 1.0) *
+        (selectedTower.heroId === 'drow_ranger' && selectedTower.talent === 'left' ? 1.3 : 1.0);
+
+      this.inspDmg.textContent = String(Math.round(stats.damage * dmgBonusMult));
+      this.inspSpd.textContent = `${(stats.attackRate * spdMult).toFixed(2)}/s`;
       this.inspKills.textContent = String(selectedTower.kills);
       this.inspTotalDmg.textContent =
         selectedTower.totalDamage >= 1000
           ? `${(selectedTower.totalDamage / 1000).toFixed(1)}k`
           : String(Math.floor(selectedTower.totalDamage));
+
+      // Level 3 Talent Tree Row
+      if (selectedTower.level >= 3) {
+        this.inspTalentRow.classList.remove('hidden');
+        const talents = HERO_TALENTS[selectedTower.heroId];
+        if (selectedTower.talent === null) {
+          this.inspTalentRow.innerHTML = `
+            <span class="talent-label">TALENT:</span>
+            <button data-choice="left" class="talent-btn" title="${talents.left.desc}">✦ ${talents.left.name} (${talents.left.desc})</button>
+            <button data-choice="right" class="talent-btn" title="${talents.right.desc}">✦ ${talents.right.name} (${talents.right.desc})</button>
+          `;
+          this.inspTalentRow.querySelectorAll<HTMLButtonElement>('.talent-btn').forEach((btn) => {
+            btn.addEventListener('click', () => {
+              const c = btn.dataset.choice as 'left' | 'right';
+              this.engine.chooseTowerTalent(selectedTower.id, c);
+            });
+          });
+        } else {
+          const picked = talents[selectedTower.talent];
+          this.inspTalentRow.innerHTML = `
+            <span class="talent-picked">✦ TALENT ACTIVE: <strong>${picked.name}</strong> (${picked.desc})</span>
+          `;
+        }
+      } else {
+        this.inspTalentRow.classList.add('hidden');
+      }
 
       // Secret Shop item states
       this.inspItemCount.textContent = String(selectedTower.items.length);
@@ -390,7 +514,7 @@ export class HUDController {
       this.overlay.classList.remove('hidden');
       this.difficultyPicker.classList.remove('hidden');
       this.overlayTitle.textContent = 'THE ANCIENT HAS FALLEN';
-      this.overlayDesc.innerHTML = `Your defenses fell on <strong>Wave ${snap.waveIndex} / ${snap.totalWaves}</strong> (${snap.difficulty.toUpperCase()}). Adapt your heroes &amp; Secret Shop items!`;
+      this.overlayDesc.innerHTML = `Your defenses fell on <strong>Wave ${snap.waveIndex} / ${snap.totalWaves}</strong> (${snap.difficulty.toUpperCase()}). Adapt your heroes, synergies &amp; Secret Shop items!`;
       this.overlayStats.classList.remove('hidden');
       this.overlayStats.innerHTML = `
         <span>⚔️ Reached Wave: <strong>${snap.waveIndex} / ${snap.totalWaves}</strong></span>

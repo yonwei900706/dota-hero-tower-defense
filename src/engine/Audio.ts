@@ -117,6 +117,25 @@ class SoundEngine {
     const notes = [392, 349, 311, 261];
     notes.forEach((n, i) => this.tone(n, n * 0.92, 0.28, 'sawtooth', 0.09, i * 0.16));
   }
+
+  public playRunePickup(): void {
+    const notes = [587, 740, 880, 1175];
+    notes.forEach((n, i) => this.tone(n, n * 1.05, 0.14, 'sine', 0.09, i * 0.055));
+  }
+
+  public playRelicSelect(): void {
+    const notes = [440, 554, 659, 880];
+    notes.forEach((n, i) => this.tone(n, n, 0.22, 'triangle', 0.1, i * 0.07));
+  }
+
+  public playKillstreak(): void {
+    this.tone(440, 880, 0.18, 'triangle', 0.1);
+    this.tone(660, 1320, 0.22, 'sine', 0.09, 0.07);
+  }
+
+  public playBossDrum(): void {
+    this.tone(95, 42, 0.26, 'sine', 0.09);
+  }
 }
 
 export const sound = new SoundEngine();

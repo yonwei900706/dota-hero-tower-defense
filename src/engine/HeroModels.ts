@@ -704,4 +704,13 @@ export function updateHeroRig(rig: HeroRig, tower: TowerInstance, time: number):
   if (rig.cmAuraRing) {
     rig.cmAuraRing.rotation.z = time * 0.8;
   }
+
+  // Divine Rapier golden aura or Level 3+ talent glow on ground ring
+  if (tower.items.includes('divine_rapier')) {
+    rig.levelRing.visible = true;
+    const rMat = rig.levelRing.material as THREE.MeshStandardMaterial;
+    rMat.color.setHex(0xfacc15);
+    rMat.emissive.setHex(0xfacc15);
+    rMat.emissiveIntensity = 1.6 + Math.sin(time * 6) * 0.4;
+  }
 }

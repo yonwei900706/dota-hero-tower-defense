@@ -11,7 +11,11 @@ const engine = new GameEngine(() => {
   hud?.sync();
 });
 const renderer = new Renderer3D(wrapper, overlayCanvas);
-hud = new HUDController(engine);
+hud = new HUDController(
+  engine,
+  () => renderer.quality,
+  () => renderer.toggleQuality()
+);
 
 const glCanvas = renderer.domElement;
 

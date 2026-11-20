@@ -361,6 +361,120 @@ body {
   color: #e0f2fe;
 }
 
+.time-btn[data-time='day'] {
+  border-color: #fbbf24;
+  color: #fef08a;
+}
+
+.time-btn[data-time='night'] {
+  border-color: #818cf8;
+  color: #c7d2fe;
+}
+
+.quality-btn {
+  border-color: #a855f7;
+  color: #e9d5ff;
+}
+
+.synergy-bar {
+  position: absolute;
+  top: 48px;
+  left: 12px;
+  z-index: 8;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 70%;
+  pointer-events: auto;
+}
+
+.hud-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(9, 13, 20, 0.85);
+  border: 1.5px solid var(--gold);
+  color: #f8fafc;
+  backdrop-filter: blur(5px);
+}
+
+.killstreak-banner {
+  position: absolute;
+  top: 20%;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 15;
+  font-family: 'Cinzel', serif;
+  font-size: 32px;
+  font-weight: 900;
+  letter-spacing: 0.1em;
+  text-shadow: 0 4px 20px rgba(0, 0, 0, 0.95), 0 0 24px currentColor;
+  pointer-events: none;
+  animation: streakPop 0.35s ease-out;
+}
+
+@keyframes streakPop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -10px) scale(0.8);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+}
+
+.relic-card-wrap {
+  max-width: 680px;
+  width: 94%;
+}
+
+.relic-subtitle {
+  margin-bottom: 14px !important;
+}
+
+.relic-choices {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.relic-choice-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 14px 10px;
+  border-radius: 9px;
+  background: #0d1420;
+  border: 1.5px solid var(--relic-color, var(--gold));
+  color: #e2e8f0;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.15s ease;
+}
+
+.relic-choice-card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 0 18px rgba(250, 204, 21, 0.35);
+}
+
+.relic-icon {
+  font-size: 28px;
+}
+
+.relic-choice-card strong {
+  font-family: 'Cinzel', serif;
+  font-size: 13px;
+  color: #fef08a;
+}
+
+.relic-choice-card span:last-child {
+  font-size: 11px;
+  line-height: 1.35;
+  color: #cbd5e1;
+}
+
 .difficulty-picker {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -495,9 +609,9 @@ body {
 /* Bottom Dota HUD */
 #bottom-hud {
   display: grid;
-  grid-template-columns: 1.48fr 1fr;
+  grid-template-columns: 1.42fr 1fr;
   gap: 10px;
-  height: 172px;
+  height: 184px;
 }
 
 .hud-panel {
@@ -798,10 +912,48 @@ body {
   white-space: nowrap;
 }
 
+.talent-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.talent-label {
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--gold);
+  white-space: nowrap;
+}
+
+.talent-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 4px;
+  background: #172033;
+  border: 1px solid #f59e0b;
+  color: #fef08a;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.talent-btn:hover {
+  background: #22304a;
+}
+
+.talent-picked {
+  font-size: 10px;
+  color: #fde047;
+}
+
 .secret-shop-btns {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 4px;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 3px;
   flex: 1;
 }
 
@@ -924,7 +1076,39 @@ body {
   .tactical-spells {
     top: 6px;
     left: 6px;
-    gap: 5px;
+    gap: 4px;
+    flex-wrap: wrap;
+    max-width: calc(100% - 12px);
+  }
+
+  .synergy-bar {
+    top: 66px;
+    left: 6px;
+    max-width: calc(100% - 12px);
+  }
+
+  .killstreak-banner {
+    font-size: 22px;
+  }
+
+  .relic-choices {
+    grid-template-columns: 1fr;
+  }
+
+  .secret-shop-btns {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .inspector-panel {
+    max-height: 248px;
+    overflow-y: auto;
+  }
+
+  .insp-role {
+    max-width: 145px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .spell-btn {
@@ -1006,10 +1190,6 @@ body {
 
   .hero-cost {
     font-size: 10px;
-  }
-
-  .inspector-panel {
-    max-height: 156px;
   }
 
   .insp-close-btn {

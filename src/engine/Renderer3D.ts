@@ -1,4 +1,9 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 import { HERO_MAP } from '../data/heroes';
 import {
   CANVAS_HEIGHT,
@@ -10,10 +15,18 @@ import {
   PATH_WIDTH,
   RIVER_BRIDGES,
 } from '../data/map';
-import { Season } from '../types';
-import { GameEngine } from './GameEngine';
+import { RUNE_DEFS } from '../data/mechanics';
+import { GraphicsQuality, Season, TimeOfDay } from '../types';
 import { CreepRig, createCreepRig, updateCreepRig } from './CreepModels';
+import { GameEngine } from './GameEngine';
 import { HeroRig, createHeroRig, updateHeroRig } from './HeroModels';
+import { ParticleSystem3D } from './ParticleSystem3D';
+import {
+  createCobblestoneTextures,
+  createSeasonGroundTexture,
+  createStonePedestalTextures,
+  createTerrainBumpMap,
+} from './ProceduralTextures';
 
 const WORLD_SCALE = 0.05;
 const PEDESTAL_HEIGHT = 0.52;
@@ -39,11 +52,46 @@ interface Effect3DEntry {
   kind: string;
 }
 
+interface TorchEntry {
+  flame: THREE.Mesh;
+  light?: THREE.PointLight;
+  basePos: THREE.Vector3;
+  phase: number;
+}
+
+interface Rune3DEntry {
+  group: THREE.Group;
+  crystal: THREE.Mesh;
+  ring: THREE.Mesh;
+}
+
+interface SwayTreeEntry {
+  canopy: THREE.Group;
+  phase: number;
+}
+
+function smoothstep(edge0: number, edge1: number, x: number): number {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+
+function distToSegment(px: number, pz: number, ax: number, az: number, bx: number, bz: number): number {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const lenSq = dx * dx + dz * dz;
+  if (lenSq === 0) return Math.hypot(px - ax, pz - az);
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (pz - az) * dz) / lenSq));
+  return Math.hypot(px - (ax + t * dx), pz - (az + t * dz));
+}
+
 export class Renderer3D {
   private container: HTMLElement;
   private renderer: THREE.WebGLRenderer;
+  private composer: EffectComposer;
+  private bloomPass: UnrealBloomPass;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
+  public quality: GraphicsQuality;
 
   private overlayCanvas: HTMLCanvasElement;
   private overlayCtx: CanvasRenderingContext2D;
@@ -51,19 +99,32 @@ export class Renderer3D {
   // Camera rig state (framed for 1560x860 Grand Map)
   private camTarget = new THREE.Vector3(0.4, 0, 0.8);
   private camDistance = 74;
-  private camYaw = 0; // radians
-  private camPitch = 0.89; // radians from horizontal
+  private camYaw = 0;
+  private camPitch = 0.89;
   private shakeIntensity = 0;
 
-  // 4-Season dynamic scene handles
-  private currentSeason: Season | null = null;
+  // 4-Season + Day/Night dynamic scene handles
+  private currentThemeKey = '';
   private seasonTextures!: Record<Season, THREE.CanvasTexture>;
   private groundMesh!: THREE.Mesh;
   private sunLight!: THREE.DirectionalLight;
   private hemiLight!: THREE.HemisphereLight;
   private treeCanopyMat!: THREE.MeshStandardMaterial;
   private blossomCanopyMat!: THREE.MeshStandardMaterial;
+  private grassTuftMat!: THREE.MeshStandardMaterial;
   private weatherVelocities: Float32Array = new Float32Array(0);
+
+  // GLSL River & Lighting Props
+  private riverUniforms!: {
+    uTime: { value: number };
+    uWaterShallow: { value: THREE.Color };
+    uWaterDeep: { value: THREE.Color };
+    uSkyColor: { value: THREE.Color };
+    uWinterMix: { value: number };
+  };
+  private torches: TorchEntry[] = [];
+  private swayingTrees: SwayTreeEntry[] = [];
+  private particles!: ParticleSystem3D;
 
   // Raycasting
   private raycaster = new THREE.Raycaster();
@@ -73,7 +134,8 @@ export class Renderer3D {
   private padRunes = new Map<number, THREE.Mesh>();
   private heroRigs = new Map<number, HeroRig>();
   private creepRigs = new Map<number, CreepRig>();
-  private projectileMeshes = new Map<number, THREE.Mesh>();
+  private projectileMeshes = new Map<number, THREE.Object3D>();
+  private runeMeshes = new Map<number, Rune3DEntry>();
   private effectMeshes = new Map<number, Effect3DEntry>();
   private seenEffectIds = new Set<number>();
 
@@ -81,7 +143,6 @@ export class Renderer3D {
   private ancientCrystal!: THREE.Mesh;
   private ancientRing!: THREE.Mesh;
   private direVortex!: THREE.Mesh;
-  private riverMesh!: THREE.Mesh;
   private ambientParticles!: THREE.Points;
 
   // Range preview rings
@@ -104,9 +165,11 @@ export class Renderer3D {
     if (!octx) throw new Error('Overlay 2D context unavailable');
     this.overlayCtx = octx;
 
+    this.quality = window.innerWidth > 820 ? 'high' : 'medium';
+
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x090d14);
-    this.scene.fog = new THREE.FogExp2(0x0b1019, 0.0085);
+    this.scene.fog = new THREE.FogExp2(0x0b1019, 0.0068);
 
     const w = Math.max(1, container.clientWidth);
     const h = Math.max(1, container.clientHeight);
@@ -120,10 +183,25 @@ export class Renderer3D {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.18;
+    this.renderer.toneMappingExposure = 1.12;
+
+    // HDR Image-Based Lighting (IBL) for realistic metallic & crystal reflections
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.62;
+    pmrem.dispose();
+
+    // Post-Processing Bloom Composer
+    this.composer = new EffectComposer(this.renderer);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.36, 0.38, 0.86);
+    this.composer.addPass(this.bloomPass);
+    this.composer.addPass(new OutputPass());
 
     this.renderer.domElement.className = 'webgl-canvas';
     container.insertBefore(this.renderer.domElement, overlayCanvas);
+
+    this.particles = new ParticleSystem3D(this.scene);
 
     this.resize();
     this.setupLights();
@@ -136,12 +214,19 @@ export class Renderer3D {
     return this.renderer.domElement;
   }
 
+  public toggleQuality(): GraphicsQuality {
+    this.quality = this.quality === 'high' ? 'medium' : 'high';
+    return this.quality;
+  }
+
   public resize(): void {
     const w = Math.max(1, this.container.clientWidth);
     const h = Math.max(1, this.container.clientHeight);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
+    this.composer.setSize(w, h);
+    this.bloomPass.setSize(w, h);
 
     const dpr = Math.min(window.devicePixelRatio, 2);
     this.overlayCanvas.width = Math.floor(w * dpr);
@@ -300,12 +385,53 @@ export class Renderer3D {
     });
   }
 
+  private getRiverCenterX(wz: number): number {
+    return -2.1 - wz * 0.49;
+  }
+
+  private getMinPlayableDist(wx: number, wz: number): number {
+    let minD = Infinity;
+    for (let i = 0; i < PATH_WAYPOINTS.length - 1; i++) {
+      const a = PATH_WAYPOINTS[i];
+      const b = PATH_WAYPOINTS[i + 1];
+      const d = distToSegment(wx, wz, toWorldX(a.x), toWorldZ(a.y), toWorldX(b.x), toWorldZ(b.y));
+      if (d < minD) minD = d;
+    }
+    for (const pad of INITIAL_BUILD_PADS) {
+      const d = Math.hypot(wx - toWorldX(pad.x), wz - toWorldZ(pad.y));
+      if (d < minD) minD = d;
+    }
+    return minD;
+  }
+
+  private getTerrainHeight(wx: number, wz: number): number {
+    const riverDist = Math.abs(wx - this.getRiverCenterX(wz));
+    const riverDepth = -1.25 * (1 - smoothstep(1.2, 4.3, riverDist));
+    if (riverDist < 4.3) {
+      return riverDepth;
+    }
+
+    const playableDist = this.getMinPlayableDist(wx, wz);
+    const flatBlend = smoothstep(3.2, 7.2, playableDist);
+
+    const hills =
+      (Math.sin(wx * 0.18) * Math.cos(wz * 0.22) * 0.55 +
+        Math.sin(wx * 0.35 + wz * 0.27) * 0.25 +
+        0.55) *
+      flatBlend;
+
+    // Dramatic outer perimeter cliffs framing the battlefield
+    const edgeX = smoothstep(33, 47, Math.abs(wx));
+    const edgeZ = smoothstep(19, 29, Math.abs(wz));
+    const cliff = Math.max(edgeX, edgeZ) * 3.4 * flatBlend;
+
+    return hills + cliff;
+  }
+
   private setupLights(): void {
-    // Soft sky-ground hemisphere fill
     this.hemiLight = new THREE.HemisphereLight(0x9ec5f8, 0x1c1412, 0.85);
     this.scene.add(this.hemiLight);
 
-    // Main directional key light casting crisp real-time shadows across the grand arena
     this.sunLight = new THREE.DirectionalLight(0xfff5e0, 1.95);
     this.sunLight.position.set(24, 46, 26);
     this.sunLight.castShadow = true;
@@ -321,212 +447,199 @@ export class Renderer3D {
     this.sunLight.shadow.bias = -0.0005;
     this.scene.add(this.sunLight);
 
-    // Dire volcanic rim light (top-left)
-    const direLight = new THREE.PointLight(0xef4444, 28, 42, 1.5);
+    const direLight = new THREE.PointLight(0xef4444, 32, 44, 1.4);
     direLight.position.set(toWorldX(PATH_WAYPOINTS[0].x), 6, toWorldZ(PATH_WAYPOINTS[0].y));
     this.scene.add(direLight);
 
-    // Radiant Ancient emerald glow light (bottom-right)
     const end = PATH_WAYPOINTS[PATH_WAYPOINTS.length - 1];
-    const radiantLight = new THREE.PointLight(0x10b981, 32, 44, 1.5);
+    const radiantLight = new THREE.PointLight(0x10b981, 36, 46, 1.4);
     radiantLight.position.set(toWorldX(end.x), 6.5, toWorldZ(end.y));
     this.scene.add(radiantLight);
 
-    // Subtle river cyan bounce light
-    const riverLight = new THREE.PointLight(0x38bdf8, 14, 38, 1.6);
-    riverLight.position.set(0, 4.5, 0);
+    const riverLight = new THREE.PointLight(0x38bdf8, 14, 40, 1.5);
+    riverLight.position.set(-2, 4.5, 0);
     this.scene.add(riverLight);
   }
 
-  private createSeasonTerrainTexture(season: Season): THREE.CanvasTexture {
-    const texCanvas = document.createElement('canvas');
-    texCanvas.width = 1024;
-    texCanvas.height = 512;
-    const ctx = texCanvas.getContext('2d')!;
-
-    const grad = ctx.createLinearGradient(0, 0, 1024, 512);
-    if (season === 'spring') {
-      grad.addColorStop(0, '#1f2b22');
-      grad.addColorStop(0.4, '#1b3826');
-      grad.addColorStop(0.75, '#1f452c');
-      grad.addColorStop(1, '#225435');
-    } else if (season === 'summer') {
-      grad.addColorStop(0, '#2a2419');
-      grad.addColorStop(0.45, '#273a1e');
-      grad.addColorStop(0.8, '#2d4b22');
-      grad.addColorStop(1, '#365314');
-    } else if (season === 'autumn') {
-      grad.addColorStop(0, '#2c1816');
-      grad.addColorStop(0.4, '#3d2217');
-      grad.addColorStop(0.75, '#4c2916');
-      grad.addColorStop(1, '#5c3317');
-    } else {
-      // winter
-      grad.addColorStop(0, '#1e293b');
-      grad.addColorStop(0.4, '#334155');
-      grad.addColorStop(0.75, '#475569');
-      grad.addColorStop(1, '#64748b');
-    }
-    ctx.fillStyle = grad;
-    ctx.fillRect(0, 0, 1024, 512);
-
-    // Organic seasonal ground speckles (petals, grass, autumn leaves, snowdrifts)
-    for (let i = 0; i < 2800; i++) {
-      const x = Math.random() * 1024;
-      const y = Math.random() * 512;
-      const r = 2 + Math.random() * 10;
-      if (season === 'spring') {
-        ctx.fillStyle =
-          Math.random() < 0.25
-            ? `rgba(244, 114, 182, ${0.06 + Math.random() * 0.1})`
-            : `rgba(74, 222, 128, ${0.03 + Math.random() * 0.06})`;
-      } else if (season === 'summer') {
-        ctx.fillStyle =
-          Math.random() < 0.3
-            ? `rgba(250, 204, 21, ${0.03 + Math.random() * 0.06})`
-            : `rgba(34, 197, 94, ${0.03 + Math.random() * 0.06})`;
-      } else if (season === 'autumn') {
-        ctx.fillStyle =
-          Math.random() < 0.5
-            ? `rgba(249, 115, 22, ${0.06 + Math.random() * 0.1})`
-            : `rgba(234, 179, 8, ${0.05 + Math.random() * 0.09})`;
-      } else {
-        ctx.fillStyle = `rgba(241, 245, 249, ${0.08 + Math.random() * 0.16})`;
-      }
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-
-    const tex = new THREE.CanvasTexture(texCanvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    return tex;
-  }
-
-  private applySeasonTheme(season: Season): void {
-    if (this.currentSeason === season) return;
-    this.currentSeason = season;
+  private applySeasonAndTimeTheme(season: Season, timeOfDay: TimeOfDay): void {
+    const key = `${season}_${timeOfDay}`;
+    if (this.currentThemeKey === key) return;
+    this.currentThemeKey = key;
 
     const gMat = this.groundMesh.material as THREE.MeshStandardMaterial;
     gMat.map = this.seasonTextures[season];
     gMat.needsUpdate = true;
 
-    const riverMat = this.riverMesh.material as THREE.MeshStandardMaterial;
     const pMat = this.ambientParticles.material as THREE.PointsMaterial;
     const fog = this.scene.fog as THREE.FogExp2;
+    const isNight = timeOfDay === 'night';
+
+    this.scene.environmentIntensity = isNight ? 0.42 : 0.65;
+    this.riverUniforms.uWinterMix.value = season === 'winter' ? 1.0 : 0.0;
 
     if (season === 'spring') {
-      this.scene.background = new THREE.Color(0x0d1b24);
-      fog.color.setHex(0x10222c);
-      this.sunLight.color.setHex(0xfff7ed);
-      this.sunLight.intensity = 1.95;
-      this.hemiLight.color.setHex(0xa5d8ff);
+      this.scene.background = new THREE.Color(isNight ? 0x071018 : 0x0e1d26);
+      fog.color.setHex(isNight ? 0x09131c : 0x11242e);
+      this.sunLight.color.setHex(isNight ? 0x93c5fd : 0xfff7ed);
+      this.sunLight.intensity = isNight ? 1.05 : 1.95;
+      this.hemiLight.color.setHex(isNight ? 0x475569 : 0xa5d8ff);
       this.hemiLight.groundColor.setHex(0x1b3324);
       this.treeCanopyMat.color.setHex(0x22c55e);
       this.blossomCanopyMat.color.setHex(0xf472b6);
-      riverMat.color.setHex(0x06b6d4);
-      riverMat.emissive.setHex(0x0891b2);
-      riverMat.roughness = 0.14;
+      this.grassTuftMat.color.setHex(0x16a34a);
+      this.riverUniforms.uWaterShallow.value.setHex(0x06b6d4);
+      this.riverUniforms.uWaterDeep.value.setHex(0x0c4a6e);
+      this.riverUniforms.uSkyColor.value.setHex(isNight ? 0x1e3a5f : 0x7dd3fc);
       pMat.color.setHex(0xf9a8d4);
       pMat.size = 0.34;
     } else if (season === 'summer') {
-      this.scene.background = new THREE.Color(0x111914);
-      fog.color.setHex(0x162119);
-      this.sunLight.color.setHex(0xfef08a);
-      this.sunLight.intensity = 2.15;
-      this.hemiLight.color.setHex(0xfde68a);
+      this.scene.background = new THREE.Color(isNight ? 0x09100c : 0x121b15);
+      fog.color.setHex(isNight ? 0x0c1610 : 0x162219);
+      this.sunLight.color.setHex(isNight ? 0x93c5fd : 0xfef08a);
+      this.sunLight.intensity = isNight ? 1.05 : 2.15;
+      this.hemiLight.color.setHex(isNight ? 0x64748b : 0xfde68a);
       this.hemiLight.groundColor.setHex(0x293218);
       this.treeCanopyMat.color.setHex(0x15803d);
       this.blossomCanopyMat.color.setHex(0x65a30d);
-      riverMat.color.setHex(0x0284c7);
-      riverMat.emissive.setHex(0x0369a1);
-      riverMat.roughness = 0.12;
+      this.grassTuftMat.color.setHex(0x4d7c0f);
+      this.riverUniforms.uWaterShallow.value.setHex(0x0284c7);
+      this.riverUniforms.uWaterDeep.value.setHex(0x082f49);
+      this.riverUniforms.uSkyColor.value.setHex(isNight ? 0x1e3a5f : 0xfde68a);
       pMat.color.setHex(0xfde047);
       pMat.size = 0.28;
     } else if (season === 'autumn') {
-      this.scene.background = new THREE.Color(0x1a100e);
-      fog.color.setHex(0x241411);
-      this.sunLight.color.setHex(0xfdba74);
-      this.sunLight.intensity = 1.85;
-      this.hemiLight.color.setHex(0xfb923c);
+      this.scene.background = new THREE.Color(isNight ? 0x110a0a : 0x1c110e);
+      fog.color.setHex(isNight ? 0x170d0c : 0x261511);
+      this.sunLight.color.setHex(isNight ? 0xa5b4fc : 0xfdba74);
+      this.sunLight.intensity = isNight ? 1.0 : 1.85;
+      this.hemiLight.color.setHex(isNight ? 0x64748b : 0xfb923c);
       this.hemiLight.groundColor.setHex(0x2e1710);
       this.treeCanopyMat.color.setHex(0xd97706);
       this.blossomCanopyMat.color.setHex(0xdc2626);
-      riverMat.color.setHex(0x0e7490);
-      riverMat.emissive.setHex(0x155e75);
-      riverMat.roughness = 0.18;
+      this.grassTuftMat.color.setHex(0xb45309);
+      this.riverUniforms.uWaterShallow.value.setHex(0x0e7490);
+      this.riverUniforms.uWaterDeep.value.setHex(0x164e63);
+      this.riverUniforms.uSkyColor.value.setHex(isNight ? 0x312e81 : 0xfdba74);
       pMat.color.setHex(0xf97316);
       pMat.size = 0.36;
     } else {
       // winter
-      this.scene.background = new THREE.Color(0x0c1624);
-      fog.color.setHex(0x142438);
-      this.sunLight.color.setHex(0xe0f2fe);
-      this.sunLight.intensity = 2.05;
-      this.hemiLight.color.setHex(0xbae6fd);
+      this.scene.background = new THREE.Color(isNight ? 0x060d18 : 0x0e1929);
+      fog.color.setHex(isNight ? 0x0a1424 : 0x152538);
+      this.sunLight.color.setHex(isNight ? 0x93c5fd : 0xe0f2fe);
+      this.sunLight.intensity = isNight ? 1.15 : 2.05;
+      this.hemiLight.color.setHex(isNight ? 0x475569 : 0xbae6fd);
       this.hemiLight.groundColor.setHex(0x334155);
       this.treeCanopyMat.color.setHex(0xcbd5e1);
       this.blossomCanopyMat.color.setHex(0xe0f2fe);
-      riverMat.color.setHex(0x7dd3fc);
-      riverMat.emissive.setHex(0x38bdf8);
-      riverMat.roughness = 0.08;
+      this.grassTuftMat.color.setHex(0x94a3b8);
+      this.riverUniforms.uWaterShallow.value.setHex(0x7dd3fc);
+      this.riverUniforms.uWaterDeep.value.setHex(0x0284c7);
+      this.riverUniforms.uSkyColor.value.setHex(0xe0f2fe);
       pMat.color.setHex(0xffffff);
       pMat.size = 0.36;
     }
   }
 
   private buildEnvironment(): void {
-    // Pre-generate 4-Season procedural terrain textures
     this.seasonTextures = {
-      spring: this.createSeasonTerrainTexture('spring'),
-      summer: this.createSeasonTerrainTexture('summer'),
-      autumn: this.createSeasonTerrainTexture('autumn'),
-      winter: this.createSeasonTerrainTexture('winter'),
+      spring: createSeasonGroundTexture('spring'),
+      summer: createSeasonGroundTexture('summer'),
+      autumn: createSeasonGroundTexture('autumn'),
+      winter: createSeasonGroundTexture('winter'),
     };
     this.treeCanopyMat = new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.78 });
     this.blossomCanopyMat = new THREE.MeshStandardMaterial({ color: 0xf472b6, roughness: 0.72 });
+    this.grassTuftMat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.85 });
 
-    // 1. Sculpted Grand Ground Plane
-    const groundGeo = new THREE.PlaneGeometry(122, 78);
+    // 1. Sculpted 3D Heightmap Terrain with Carved Riverbed & Perimeter Cliffs
+    const groundGeo = new THREE.PlaneGeometry(124, 80, 96, 64);
+    groundGeo.rotateX(-Math.PI / 2);
+    const pos = groundGeo.attributes.position as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const wx = pos.getX(i);
+      const wz = pos.getZ(i);
+      pos.setY(i, this.getTerrainHeight(wx, wz));
+    }
+    pos.needsUpdate = true;
+    groundGeo.computeVertexNormals();
+
     const groundMat = new THREE.MeshStandardMaterial({
       map: this.seasonTextures.spring,
-      roughness: 0.9,
-      metalness: 0.05,
+      bumpMap: createTerrainBumpMap(),
+      bumpScale: 0.16,
+      roughness: 0.88,
+      metalness: 0.04,
     });
     this.groundMesh = new THREE.Mesh(groundGeo, groundMat);
-    this.groundMesh.rotation.x = -Math.PI / 2;
     this.groundMesh.receiveShadow = true;
     this.scene.add(this.groundMesh);
 
-    // 2. Shimmering 3D River cutting diagonally through the Grand Map
-    const riverGeo = new THREE.PlaneGeometry(5.2, 72, 8, 28);
-    const riverMat = new THREE.MeshStandardMaterial({
-      color: 0x06b6d4,
-      emissive: 0x0891b2,
-      emissiveIntensity: 0.42,
-      roughness: 0.14,
-      metalness: 0.65,
-      transparent: true,
-      opacity: 0.84,
-    });
-    this.riverMesh = new THREE.Mesh(riverGeo, riverMat);
-    this.riverMesh.rotation.x = -Math.PI / 2;
-    this.riverMesh.rotation.z = -0.45;
-    this.riverMesh.position.set(-1.5, 0.03, 0);
-    this.riverMesh.receiveShadow = true;
-    this.scene.add(this.riverMesh);
+    // 2. Custom GLSL Animated River Shader inside the Carved Trench
+    this.riverUniforms = {
+      uTime: { value: 0 },
+      uWaterShallow: { value: new THREE.Color(0x06b6d4) },
+      uWaterDeep: { value: new THREE.Color(0x0c4a6e) },
+      uSkyColor: { value: new THREE.Color(0x7dd3fc) },
+      uWinterMix: { value: 0 },
+    };
 
-    // 3. Elevated Cobblestone Lane & Stone Curbs
-    const roadW = PATH_WIDTH * WORLD_SCALE;
-    const roadMat = new THREE.MeshStandardMaterial({
-      color: 0x38332e,
-      roughness: 0.85,
-      metalness: 0.1,
+    const riverGeo = new THREE.PlaneGeometry(6.8, 76, 12, 36);
+    riverGeo.rotateX(-Math.PI / 2);
+    const riverMat = new THREE.ShaderMaterial({
+      uniforms: this.riverUniforms,
+      transparent: true,
+      vertexShader: `
+        varying vec2 vUv;
+        uniform float uTime;
+        uniform float uWinterMix;
+        void main() {
+          vUv = uv;
+          vec3 p = position;
+          float wave = sin(p.z * 0.65 + uTime * 2.2) * cos(p.x * 1.4 - uTime * 1.3) * 0.04;
+          p.y += wave * (1.0 - uWinterMix * 0.85);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+        }
+      `,
+      fragmentShader: `
+        varying vec2 vUv;
+        uniform float uTime;
+        uniform vec3 uWaterShallow;
+        uniform vec3 uWaterDeep;
+        uniform vec3 uSkyColor;
+        uniform float uWinterMix;
+        void main() {
+          float flow = vUv.y * 16.0 - uTime * (0.85 - uWinterMix * 0.7);
+          float r1 = sin(vUv.x * 18.0 + flow) * cos(vUv.x * 9.0 - flow * 0.6);
+          float r2 = sin(vUv.x * 28.0 - flow * 1.2 + sin(flow * 0.5));
+          float ripple = (r1 + r2) * 0.5;
+          float edge = abs(vUv.x - 0.5) * 2.0;
+          vec3 baseCol = mix(uWaterDeep, uWaterShallow, clamp(0.45 + ripple * 0.25 + edge * 0.35, 0.0, 1.0));
+          float glint = pow(max(0.0, ripple), 5.0) * 0.55;
+          float foam = smoothstep(0.76, 0.96, edge + ripple * 0.08);
+          float icePattern = smoothstep(0.35, 0.78, sin(vUv.x * 22.0 + vUv.y * 44.0) * 0.5 + 0.5) * uWinterMix;
+          vec3 col = mix(baseCol + uSkyColor * glint, vec3(0.86, 0.95, 1.0), foam * 0.45 + icePattern * 0.42);
+          gl_FragColor = vec4(col, mix(0.84, 0.94, uWinterMix));
+        }
+      `,
     });
+    const riverMesh = new THREE.Mesh(riverGeo, riverMat);
+    riverMesh.rotation.y = Math.atan(-0.49);
+    riverMesh.position.set(-2.1, -0.34, 0);
+    this.scene.add(riverMesh);
+
+    // 3. PBR Cobblestone Lane & Stone Curbs
+    const cobble = createCobblestoneTextures();
+    const stoneTex = createStonePedestalTextures();
+    const roadW = PATH_WIDTH * WORLD_SCALE;
+
     const curbMat = new THREE.MeshStandardMaterial({
-      color: 0x57534e,
-      roughness: 0.78,
-      metalness: 0.18,
+      map: stoneTex.map,
+      bumpMap: stoneTex.bumpMap,
+      bumpScale: 0.08,
+      color: 0x78716c,
+      roughness: 0.75,
+      metalness: 0.15,
     });
 
     for (let i = 0; i < PATH_WAYPOINTS.length - 1; i++) {
@@ -539,39 +652,50 @@ export class Renderer3D {
       const len = Math.hypot(bx - ax, bz - az);
       const angle = Math.atan2(bz - az, bx - ax);
 
-      // Curb base
-      const curb = new THREE.Mesh(
-        new THREE.BoxGeometry(len + roadW, 0.18, roadW + 0.36),
-        curbMat
-      );
+      const segMap = cobble.map.clone();
+      segMap.needsUpdate = true;
+      segMap.repeat.set(Math.max(1, Math.round((len + roadW) / 3.2)), 1);
+      const segBump = cobble.bumpMap.clone();
+      segBump.needsUpdate = true;
+      segBump.repeat.copy(segMap.repeat);
+
+      const roadMat = new THREE.MeshStandardMaterial({
+        map: segMap,
+        bumpMap: segBump,
+        bumpScale: 0.12,
+        roughness: 0.82,
+        metalness: 0.08,
+      });
+
+      const curb = new THREE.Mesh(new THREE.BoxGeometry(len + roadW, 0.18, roadW + 0.38), curbMat);
       curb.position.set((ax + bx) / 2, 0.08, (az + bz) / 2);
       curb.rotation.y = -angle;
       curb.receiveShadow = true;
       curb.castShadow = true;
       this.scene.add(curb);
 
-      // Road cobblestone surface
-      const road = new THREE.Mesh(
-        new THREE.BoxGeometry(len + roadW - 0.2, 0.22, roadW),
-        roadMat
-      );
+      const road = new THREE.Mesh(new THREE.BoxGeometry(len + roadW - 0.18, 0.22, roadW), roadMat);
       road.position.set((ax + bx) / 2, 0.09, (az + bz) / 2);
       road.rotation.y = -angle;
       road.receiveShadow = true;
       this.scene.add(road);
     }
 
-    // 3b. 3D Stone Bridges with Railings where the lane crosses the River
+    // 3b. 3D Stone Bridges with Railings & Flickering Torch Braziers
     const bridgeRailMat = new THREE.MeshStandardMaterial({
-      color: 0x78716c,
-      roughness: 0.65,
+      map: stoneTex.map,
+      bumpMap: stoneTex.bumpMap,
+      bumpScale: 0.08,
+      color: 0x94a3b8,
+      roughness: 0.62,
       metalness: 0.25,
     });
     const bridgeGoldMat = new THREE.MeshStandardMaterial({
-      color: 0xd97706,
-      roughness: 0.35,
-      metalness: 0.75,
+      color: 0xf59e0b,
+      roughness: 0.25,
+      metalness: 0.85,
     });
+
     for (let bi = 0; bi < RIVER_BRIDGES.length; bi++) {
       const bs = RIVER_BRIDGES[bi];
       const bx = toWorldX(bs.x);
@@ -579,52 +703,48 @@ export class Renderer3D {
       const bridgeGroup = new THREE.Group();
       bridgeGroup.position.set(bx, 0, bz);
       if (bi === 1) {
-        // Middle river crossing is vertical lane segment
         bridgeGroup.rotation.y = Math.PI / 2;
       }
 
-      const deck = new THREE.Mesh(
-        new THREE.BoxGeometry(6.0, 0.28, roadW + 0.6),
-        bridgeRailMat
-      );
+      const deck = new THREE.Mesh(new THREE.BoxGeometry(6.2, 0.3, roadW + 0.65), bridgeRailMat);
       deck.position.y = 0.16;
       deck.receiveShadow = true;
       deck.castShadow = true;
       bridgeGroup.add(deck);
 
       for (const side of [-1, 1]) {
-        const rail = new THREE.Mesh(
-          new THREE.BoxGeometry(6.0, 0.45, 0.26),
-          bridgeRailMat
-        );
-        rail.position.set(0, 0.48, side * (roadW / 2 + 0.22));
+        const rail = new THREE.Mesh(new THREE.BoxGeometry(6.2, 0.48, 0.28), bridgeRailMat);
+        rail.position.set(0, 0.48, side * (roadW / 2 + 0.24));
         rail.castShadow = true;
         bridgeGroup.add(rail);
 
-        for (const px of [-2.8, 0, 2.8]) {
-          const post = new THREE.Mesh(
-            new THREE.BoxGeometry(0.38, 0.72, 0.38),
-            bridgeGoldMat
-          );
-          post.position.set(px, 0.56, side * (roadW / 2 + 0.22));
+        for (const px of [-2.85, 0, 2.85]) {
+          const post = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.78, 0.4), bridgeGoldMat);
+          post.position.set(px, 0.58, side * (roadW / 2 + 0.24));
           post.castShadow = true;
           bridgeGroup.add(post);
         }
       }
       this.scene.add(bridgeGroup);
+
+      // Torch brazier on every bridge
+      this.createTorchBrazier(bx + (bi === 1 ? 1.8 : 0), 0.72, bz + (bi === 1 ? 0 : -1.8), bi < 2);
     }
 
-    // 4. 3D Carved Stone Build Pedestals
+    // 4. 3D Carved Mossy Stone Build Pedestals
     const pedGeo = new THREE.CylinderGeometry(
       PAD_RADIUS * WORLD_SCALE * 0.92,
-      PAD_RADIUS * WORLD_SCALE * 1.06,
+      PAD_RADIUS * WORLD_SCALE * 1.08,
       PEDESTAL_HEIGHT,
       8
     );
     const pedMat = new THREE.MeshStandardMaterial({
-      color: 0x2a3444,
-      roughness: 0.65,
-      metalness: 0.3,
+      map: stoneTex.map,
+      bumpMap: stoneTex.bumpMap,
+      bumpScale: 0.1,
+      color: 0x64748b,
+      roughness: 0.6,
+      metalness: 0.28,
     });
 
     for (const pad of INITIAL_BUILD_PADS) {
@@ -652,69 +772,109 @@ export class Renderer3D {
       this.padRunes.set(pad.id, rune);
     }
 
-    // 5. 3D Trees & Dire Obsidian Spires
+    // 5. Upgraded Multi-Cluster Organic Trees, Rocks & Dire Spires
+    const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a2f1d, roughness: 0.9 });
     for (const prop of MAP_PROPS) {
       const wx = toWorldX(prop.x);
       const wz = toWorldZ(prop.y);
+      const groundY = Math.max(0, this.getTerrainHeight(wx, wz) - 0.12);
       const g = new THREE.Group();
-      g.position.set(wx, 0, wz);
+      g.position.set(wx, groundY, wz);
       g.scale.setScalar(prop.scale);
 
       if (prop.kind === 'rock') {
         const rock = new THREE.Mesh(
-          new THREE.DodecahedronGeometry(0.95, 0),
-          new THREE.MeshStandardMaterial({ color: 0x475569, roughness: 0.9 })
+          new THREE.DodecahedronGeometry(0.95, 1),
+          new THREE.MeshStandardMaterial({
+            map: stoneTex.map,
+            bumpMap: stoneTex.bumpMap,
+            bumpScale: 0.1,
+            color: 0x64748b,
+            roughness: 0.88,
+          })
         );
-        rock.scale.set(1.2, 0.75, 1);
-        rock.position.y = 0.45;
+        rock.scale.set(1.25, 0.72, 1.0);
+        rock.position.y = 0.42;
         rock.castShadow = true;
         rock.receiveShadow = true;
         g.add(rock);
       } else if (prop.kind === 'tree' || prop.kind === 'blossom_tree') {
-        const trunk = new THREE.Mesh(
-          new THREE.CylinderGeometry(0.2, 0.3, 1.45, 7),
-          new THREE.MeshStandardMaterial({ color: 0x4a2f1d, roughness: 0.9 })
-        );
-        trunk.position.y = 0.72;
+        const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.34, 1.5, 8), trunkMat);
+        trunk.position.y = 0.75;
         trunk.castShadow = true;
         g.add(trunk);
 
+        const canopyGroup = new THREE.Group();
+        canopyGroup.position.y = 1.5;
         const foliageMat = prop.kind === 'blossom_tree' ? this.blossomCanopyMat : this.treeCanopyMat;
-        const c1 = new THREE.Mesh(new THREE.ConeGeometry(1.3, 2.0, 7), foliageMat);
-        c1.position.y = 1.95;
-        c1.castShadow = true;
-        const c2 = new THREE.Mesh(new THREE.ConeGeometry(0.95, 1.65, 7), foliageMat);
-        c2.position.y = 2.95;
-        c2.castShadow = true;
-        g.add(c1, c2);
+        const clusters: [number, number, number, number][] = [
+          [0, 0.75, 0, 1.05],
+          [-0.6, 0.35, 0.45, 0.75],
+          [0.58, 0.4, -0.4, 0.78],
+          [0.1, 1.35, 0.1, 0.7],
+        ];
+        for (const [cx, cy, cz, cr] of clusters) {
+          const leaf = new THREE.Mesh(new THREE.IcosahedronGeometry(cr, 1), foliageMat);
+          leaf.position.set(cx, cy, cz);
+          leaf.castShadow = true;
+          leaf.receiveShadow = true;
+          canopyGroup.add(leaf);
+        }
+        g.add(canopyGroup);
+        this.swayingTrees.push({ canopy: canopyGroup, phase: wx + wz });
       } else {
-        // Dire twisted obsidian spire & glowing ember rock
         const spire = new THREE.Mesh(
-          new THREE.ConeGeometry(0.65, 2.9, 6),
-          new THREE.MeshStandardMaterial({ color: 0x2c1b22, roughness: 0.75, metalness: 0.2 })
+          new THREE.ConeGeometry(0.68, 3.0, 6),
+          new THREE.MeshStandardMaterial({ color: 0x2c1b22, roughness: 0.65, metalness: 0.3 })
         );
-        spire.position.y = 1.45;
+        spire.position.y = 1.5;
         spire.rotation.z = 0.12;
         spire.castShadow = true;
         const glow = new THREE.Mesh(
-          new THREE.OctahedronGeometry(0.28, 0),
+          new THREE.OctahedronGeometry(0.3, 0),
           new THREE.MeshStandardMaterial({
             color: 0xef4444,
             emissive: 0xdc2626,
-            emissiveIntensity: 1.5,
+            emissiveIntensity: 2.2,
           })
         );
-        glow.position.set(0.15, 2.7, 0);
+        glow.position.set(0.15, 2.8, 0);
         g.add(spire, glow);
       }
       this.scene.add(g);
     }
 
-    // 6. Towering 3D DIRE PORTAL GATE (Spawn)
+    // 5b. Instanced 3D Grass Tufts across non-road terrain
+    const tuftGeo = new THREE.ConeGeometry(0.16, 0.55, 5);
+    tuftGeo.translate(0, 0.27, 0);
+    const tuftCount = 240;
+    const tuftMesh = new THREE.InstancedMesh(tuftGeo, this.grassTuftMat, tuftCount);
+    const dummy = new THREE.Object3D();
+    let placed = 0;
+    let attempts = 0;
+    while (placed < tuftCount && attempts < 2000) {
+      attempts++;
+      const wx = (Math.random() - 0.5) * 76;
+      const wz = (Math.random() - 0.5) * 42;
+      if (Math.abs(wx - this.getRiverCenterX(wz)) < 4.5) continue;
+      if (this.getMinPlayableDist(wx, wz) < 3.4) continue;
+      const wy = this.getTerrainHeight(wx, wz);
+      dummy.position.set(wx, wy, wz);
+      dummy.rotation.y = Math.random() * Math.PI * 2;
+      dummy.scale.setScalar(0.75 + Math.random() * 0.8);
+      dummy.updateMatrix();
+      tuftMesh.setMatrixAt(placed, dummy.matrix);
+      placed++;
+    }
+    tuftMesh.count = placed;
+    tuftMesh.instanceMatrix.needsUpdate = true;
+    this.scene.add(tuftMesh);
+
+    // 6. Towering 3D DIRE PORTAL GATE (Spawn) + Torch
     const start = PATH_WAYPOINTS[0];
     const portalGroup = new THREE.Group();
     portalGroup.position.set(toWorldX(start.x), 0, toWorldZ(start.y));
-    const obsMat = new THREE.MeshStandardMaterial({ color: 0x1c1417, roughness: 0.6, metalness: 0.35 });
+    const obsMat = new THREE.MeshStandardMaterial({ color: 0x1c1417, roughness: 0.55, metalness: 0.45 });
     const pillarL = new THREE.Mesh(new THREE.BoxGeometry(0.75, 4.2, 0.75), obsMat);
     pillarL.position.set(0, 2.1, -1.6);
     pillarL.castShadow = true;
@@ -729,22 +889,28 @@ export class Renderer3D {
       new THREE.MeshStandardMaterial({
         color: 0xef4444,
         emissive: 0xdc2626,
-        emissiveIntensity: 2.2,
+        emissiveIntensity: 2.6,
       })
     );
     this.direVortex.rotation.y = Math.PI / 2;
     this.direVortex.position.set(0, 2.2, 0);
     portalGroup.add(pillarL, pillarR, arch, this.direVortex);
     this.scene.add(portalGroup);
+    this.createTorchBrazier(toWorldX(start.x) + 1.8, 0.3, toWorldZ(start.y) - 2.3, true);
 
-    // 7. Majestic 3D RADIANT ANCIENT (Base)
+    // 7. Majestic 3D RADIANT ANCIENT (Base) + Torch
     const end = PATH_WAYPOINTS[PATH_WAYPOINTS.length - 1];
     const ancGroup = new THREE.Group();
     ancGroup.position.set(toWorldX(end.x) + 0.8, 0, toWorldZ(end.y));
 
     const dais = new THREE.Mesh(
       new THREE.CylinderGeometry(2.1, 2.6, 0.7, 8),
-      new THREE.MeshStandardMaterial({ color: 0xcbd5e1, roughness: 0.5, metalness: 0.3 })
+      new THREE.MeshStandardMaterial({
+        map: stoneTex.map,
+        color: 0xcbd5e1,
+        roughness: 0.45,
+        metalness: 0.35,
+      })
     );
     dais.position.y = 0.35;
     dais.castShadow = true;
@@ -756,9 +922,9 @@ export class Renderer3D {
       new THREE.MeshStandardMaterial({
         color: 0x6ee7b7,
         emissive: 0x10b981,
-        emissiveIntensity: 1.4,
-        roughness: 0.12,
-        metalness: 0.5,
+        emissiveIntensity: 2.1,
+        roughness: 0.1,
+        metalness: 0.55,
       })
     );
     this.ancientCrystal.scale.set(0.85, 1.75, 0.85);
@@ -771,9 +937,9 @@ export class Renderer3D {
       new THREE.MeshStandardMaterial({
         color: 0xfbbf24,
         emissive: 0xf59e0b,
-        emissiveIntensity: 0.9,
-        metalness: 0.85,
-        roughness: 0.2,
+        emissiveIntensity: 1.5,
+        metalness: 0.9,
+        roughness: 0.18,
       })
     );
     this.ancientRing.position.y = 2.8;
@@ -784,16 +950,17 @@ export class Renderer3D {
       new THREE.MeshBasicMaterial({
         color: 0x34d399,
         transparent: true,
-        opacity: 0.14,
+        opacity: 0.16,
         side: THREE.DoubleSide,
       })
     );
     beam.position.y = 6.5;
     ancGroup.add(beam);
     this.scene.add(ancGroup);
+    this.createTorchBrazier(toWorldX(end.x) - 1.5, 0.3, toWorldZ(end.y) + 2.4, true);
 
-    // 8. 4-Season 3D Weather Particles (Petals / Sun-Motes / Autumn Leaves / Snowflakes)
-    const count = 260;
+    // 8. 4-Season 3D Weather Particles
+    const count = 280;
     const positions = new Float32Array(count * 3);
     this.weatherVelocities = new Float32Array(count);
     for (let i = 0; i < count; i++) {
@@ -814,7 +981,38 @@ export class Renderer3D {
       })
     );
     this.scene.add(this.ambientParticles);
-    this.applySeasonTheme('spring');
+    this.applySeasonAndTimeTheme('spring', 'day');
+  }
+
+  private createTorchBrazier(wx: number, wy: number, wz: number, withLight: boolean): void {
+    const stand = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.18, 0.28, 0.7, 6),
+      new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.5, metalness: 0.6 })
+    );
+    stand.position.set(wx, wy + 0.35, wz);
+    stand.castShadow = true;
+    this.scene.add(stand);
+
+    const flame = new THREE.Mesh(
+      new THREE.ConeGeometry(0.22, 0.62, 6),
+      new THREE.MeshBasicMaterial({ color: 0xfb923c })
+    );
+    flame.position.set(wx, wy + 0.88, wz);
+    this.scene.add(flame);
+
+    let light: THREE.PointLight | undefined;
+    if (withLight) {
+      light = new THREE.PointLight(0xf97316, 10, 14, 1.6);
+      light.position.set(wx, wy + 1.25, wz);
+      this.scene.add(light);
+    }
+
+    this.torches.push({
+      flame,
+      light,
+      basePos: new THREE.Vector3(wx, wy + 0.88, wz),
+      phase: wx * 1.3 + wz * 0.7,
+    });
   }
 
   private buildRangeOverlays(): void {
@@ -847,7 +1045,7 @@ export class Renderer3D {
     this.scene.add(this.rangeBorder);
 
     this.cmAuraCircle = new THREE.Mesh(
-      new THREE.RingGeometry(175 * WORLD_SCALE - 0.15, 175 * WORLD_SCALE, 48),
+      new THREE.RingGeometry(195 * WORLD_SCALE - 0.15, 195 * WORLD_SCALE, 48),
       new THREE.MeshBasicMaterial({
         color: 0x38bdf8,
         transparent: true,
@@ -882,18 +1080,36 @@ export class Renderer3D {
   public render(engine: GameEngine, dt: number): void {
     const time = engine.elapsedTime;
     const season = engine.getActiveSeason();
-    this.applySeasonTheme(season);
+    const timeOfDay = engine.getActiveTimeOfDay();
+    this.applySeasonAndTimeTheme(season, timeOfDay);
 
-    // Animate landmarks & 4-Season weather particles
+    // GLSL River time uniform
+    this.riverUniforms.uTime.value = time;
+
+    // Animate landmarks
     this.ancientCrystal.rotation.y = time * 0.9;
     this.ancientCrystal.position.y = 2.8 + Math.sin(time * 2.2) * 0.25;
     this.ancientRing.rotation.x = time * 0.7;
     this.ancientRing.rotation.y = time * 1.1;
     this.direVortex.rotation.z = -time * 2.2;
-    (this.riverMesh.material as THREE.MeshStandardMaterial).emissiveIntensity =
-      0.38 + Math.sin(time * 2.5) * 0.12;
 
-    // Update falling weather particles
+    // Gentle tree wind sway
+    for (const st of this.swayingTrees) {
+      st.canopy.rotation.z = Math.sin(time * 1.4 + st.phase) * 0.04;
+      st.canopy.rotation.x = Math.cos(time * 1.1 + st.phase) * 0.03;
+    }
+
+    // Flickering 3D Torches (brighter at Night)
+    const torchMult = timeOfDay === 'night' ? 1.85 : 0.85;
+    for (const t of this.torches) {
+      const flick = 0.88 + Math.sin(time * 15 + t.phase) * 0.14 + Math.cos(time * 23 + t.phase) * 0.08;
+      t.flame.scale.set(1, flick, 1);
+      if (t.light) {
+        t.light.intensity = 10 * torchMult * flick;
+      }
+    }
+
+    // Falling 4-Season weather particles
     const posAttr = this.ambientParticles.geometry.getAttribute('position') as THREE.BufferAttribute;
     const arr = posAttr.array as Float32Array;
     const fallMult = season === 'summer' ? 0.25 : season === 'winter' ? 1.45 : 0.95;
@@ -911,15 +1127,26 @@ export class Renderer3D {
     }
     posAttr.needsUpdate = true;
 
+    // Drain & spawn 3D burst particles (gold coins, spell shards, rock debris)
+    for (const evt of engine.drainBurstEvents()) {
+      this.particles.spawnBurst(evt, toWorldX(evt.x), toWorldZ(evt.y));
+    }
+    this.particles.update(dt);
+
     this.syncPads(engine, time);
     this.syncRangeOverlays(engine);
     this.syncTowers(engine, time);
     this.syncCreeps(engine, time);
     this.syncProjectiles(engine);
+    this.syncRunes(engine, time);
     this.syncEffects(engine);
 
     this.updateCameraTransform(dt);
-    this.renderer.render(this.scene, this.camera);
+    if (this.quality === 'high') {
+      this.composer.render();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
     this.renderProjectedHUD(engine);
   }
 
@@ -974,7 +1201,15 @@ export class Renderer3D {
         show = true;
         wx = toWorldX(tower.x);
         wz = toWorldZ(tower.y);
-        radius = def.levels[tower.level - 1].range * WORLD_SCALE;
+        let rng = def.levels[tower.level - 1].range;
+        if (tower.heroId === 'sniper' && tower.talent === 'left') rng += 90;
+        if (
+          engine.getActiveSynergies().includes('marksman') &&
+          (tower.heroId === 'sniper' || tower.heroId === 'drow_ranger')
+        ) {
+          rng *= 1.2;
+        }
+        radius = rng * WORLD_SCALE;
         colorHex = new THREE.Color(def.primaryColor).getHex();
         showCmAura = tower.heroId === 'crystal_maiden' || tower.heroId === 'drow_ranger';
       }
@@ -1050,6 +1285,31 @@ export class Renderer3D {
     }
   }
 
+  private createProjectileMesh(heroId: string, colorHex: number, radius: number, isUlt: boolean): THREE.Object3D {
+    const mat = new THREE.MeshBasicMaterial({ color: colorHex });
+    if (heroId === 'sniper' || heroId === 'drow_ranger') {
+      // Sculpted aerodynamic tracer / Frost Arrow oriented along +Z
+      const g = new THREE.Group();
+      const shaft = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.05, 0.05, isUlt ? 1.45 : 0.95, 6),
+        mat
+      );
+      shaft.rotation.x = Math.PI / 2;
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.28, 6), mat);
+      tip.rotation.x = Math.PI / 2;
+      tip.position.z = isUlt ? 0.72 : 0.48;
+      g.add(shaft, tip);
+      return g;
+    }
+    if (heroId === 'crystal_maiden') {
+      const shard = new THREE.Mesh(new THREE.OctahedronGeometry(0.24, 0), mat);
+      shard.scale.set(0.8, 0.8, 1.6);
+      return shard;
+    }
+    const r = Math.max(0.16, radius * 0.045);
+    return new THREE.Mesh(new THREE.SphereGeometry(r, 10, 10), mat);
+  }
+
   private syncProjectiles(engine: GameEngine): void {
     const activeIds = new Set<number>();
 
@@ -1057,15 +1317,19 @@ export class Renderer3D {
       activeIds.add(p.id);
       let mesh = this.projectileMeshes.get(p.id);
       if (!mesh) {
-        const r = Math.max(0.14, p.radius * 0.042);
-        mesh = new THREE.Mesh(
-          new THREE.SphereGeometry(r, 10, 10),
-          new THREE.MeshBasicMaterial({ color: new THREE.Color(p.color) })
+        mesh = this.createProjectileMesh(
+          p.heroId,
+          new THREE.Color(p.color).getHex(),
+          p.radius,
+          Boolean(p.isUltimate)
         );
         this.scene.add(mesh);
         this.projectileMeshes.set(p.id, mesh);
       }
-      mesh.position.set(toWorldX(p.x), 1.45, toWorldZ(p.y));
+      const wx = toWorldX(p.x);
+      const wz = toWorldZ(p.y);
+      mesh.position.set(wx, 1.45, wz);
+      mesh.lookAt(toWorldX(p.targetX), 1.45, toWorldZ(p.targetY));
     }
 
     for (const [id, mesh] of this.projectileMeshes.entries()) {
@@ -1076,13 +1340,79 @@ export class Renderer3D {
     }
   }
 
+  private syncRunes(engine: GameEngine, time: number): void {
+    const activeIds = new Set<number>();
+
+    for (const rune of engine.activeRunes) {
+      activeIds.add(rune.id);
+      let entry = this.runeMeshes.get(rune.id);
+      if (!entry) {
+        const def = RUNE_DEFS[rune.kind];
+        const group = new THREE.Group();
+        group.position.set(toWorldX(rune.x), 0.1, toWorldZ(rune.y));
+
+        const crystal = new THREE.Mesh(
+          new THREE.OctahedronGeometry(0.58, 0),
+          new THREE.MeshStandardMaterial({
+            color: def.hex,
+            emissive: def.hex,
+            emissiveIntensity: 2.2,
+            roughness: 0.1,
+            metalness: 0.4,
+          })
+        );
+        crystal.scale.set(0.85, 1.45, 0.85);
+        crystal.position.y = 1.25;
+
+        const ring = new THREE.Mesh(
+          new THREE.RingGeometry(0.85, 1.15, 24),
+          new THREE.MeshBasicMaterial({
+            color: def.hex,
+            transparent: true,
+            opacity: 0.78,
+            side: THREE.DoubleSide,
+          })
+        );
+        ring.rotation.x = -Math.PI / 2;
+        ring.position.y = 0.05;
+
+        const pillar = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.32, 0.65, 9, 12, 1, true),
+          new THREE.MeshBasicMaterial({
+            color: def.hex,
+            transparent: true,
+            opacity: 0.16,
+            side: THREE.DoubleSide,
+          })
+        );
+        pillar.position.y = 4.6;
+
+        group.add(crystal, ring, pillar);
+        this.scene.add(group);
+        entry = { group, crystal, ring };
+        this.runeMeshes.set(rune.id, entry);
+      }
+
+      entry.crystal.rotation.y = time * 2.4;
+      entry.crystal.position.y = 1.25 + Math.sin(time * 4) * 0.25;
+      const pulse = 0.95 + Math.sin(time * 6) * 0.18;
+      entry.ring.scale.set(pulse, pulse, 1);
+    }
+
+    for (const [id, entry] of this.runeMeshes.entries()) {
+      if (!activeIds.has(id)) {
+        this.scene.remove(entry.group);
+        this.runeMeshes.delete(id);
+      }
+    }
+  }
+
   private syncEffects(engine: GameEngine): void {
     const activeIds = new Set<number>();
 
     for (const fx of engine.effects) {
       activeIds.add(fx.id);
 
-      // Trigger screen shake on dramatic spells
       if (!this.seenEffectIds.has(fx.id)) {
         this.seenEffectIds.add(fx.id);
         if (fx.kind === 'aegis_roar' || fx.kind === 'sunstrike_pillar') {
@@ -1099,7 +1429,6 @@ export class Renderer3D {
       if (!entry) {
         const col = new THREE.Color(fx.color);
         if (fx.kind === 'sky_bolt') {
-          // Vertical sky-to-ground lightning bolt (Zeus Thundergod's Wrath!)
           const tx = toWorldX(fx.x);
           const tz = toWorldZ(fx.y);
           const pts: THREE.Vector3[] = [];
@@ -1122,7 +1451,6 @@ export class Renderer3D {
           this.scene.add(mesh);
           entry = { mesh, kind: fx.kind };
         } else if (fx.kind === 'sunstrike_pillar') {
-          // Towering orbital fiery beam (Sunstrike!)
           const tx = toWorldX(fx.x);
           const tz = toWorldZ(fx.y);
           const mesh = new THREE.Mesh(
@@ -1138,7 +1466,6 @@ export class Renderer3D {
           this.scene.add(mesh);
           entry = { mesh, kind: fx.kind };
         } else if (fx.kind === 'beam' && fx.targetX !== undefined && fx.targetY !== undefined) {
-          // 3D jagged lightning bolt (Laguna Blade!)
           const pts: THREE.Vector3[] = [];
           const sx = toWorldX(fx.x);
           const sz = toWorldZ(fx.y);
@@ -1165,7 +1492,6 @@ export class Renderer3D {
           this.scene.add(mesh);
           entry = { mesh, kind: fx.kind };
         } else {
-          // Expanding 3D shockwave ring / cleave arc
           const arcLen = fx.kind === 'cleave' ? Math.PI * 0.75 : Math.PI * 2;
           const ringGeo = new THREE.RingGeometry(0.75, 1.0, 32, 1, 0, arcLen);
           const mesh = new THREE.Mesh(
@@ -1254,7 +1580,22 @@ export class Renderer3D {
       }
     }
 
-    // 2. Creep & Roshan HP Bars
+    // 2. Active River Rune Prompts
+    for (const rune of engine.activeRunes) {
+      const pos = this.projectToScreen(toWorldX(rune.x), 2.5, toWorldZ(rune.y));
+      if (!pos) continue;
+      const def = RUNE_DEFS[rune.kind];
+      ctx.font = '800 11px Cinzel, serif';
+      ctx.textAlign = 'center';
+      ctx.strokeStyle = 'rgba(2, 6, 23, 0.95)';
+      ctx.lineWidth = 3.5;
+      const txt = `${def.icon} TAP RUNE (${Math.ceil(rune.ttl)}s)`;
+      ctx.strokeText(txt, pos.x, pos.y);
+      ctx.fillStyle = def.color;
+      ctx.fillText(txt, pos.x, pos.y);
+    }
+
+    // 3. Creep & Roshan HP Bars
     for (const c of engine.creeps) {
       const yOffset = c.isBoss ? 3.85 : c.def.type.includes('dragon') ? 2.1 : 1.75;
       const pos = this.projectToScreen(toWorldX(c.x), yOffset, toWorldZ(c.y));
@@ -1283,7 +1624,7 @@ export class Renderer3D {
       }
     }
 
-    // 3. Floating Gold & Ability Callouts
+    // 4. Floating Gold & Ability Callouts
     for (const ft of engine.floatingTexts) {
       const alpha = Math.max(0, 1 - ft.age / ft.duration);
       const rise = ft.age * 2.2;
